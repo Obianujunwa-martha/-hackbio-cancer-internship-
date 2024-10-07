@@ -1,0 +1,279 @@
+#LOAD ALL THE NEEDED LIBRARIES
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(biomaRt)
+library(DESeq2)
+library(edgeR)
+
+#GET PROJECT SUMMARY
+getProjectSummary(TCGA_STAD)
+
+# QUERY TCGA_STAD
+query_STAD <_ GDCquery(project = "TCGA_STAD", data.category = "Transcriptome Profiling", data.type = "Gene Expression Quantification")
+#DOWNLOAD AND PREPARE DATA
+TCGA_STAD <- GDCdownload(query_STAD)
+TCGA_STAD <- GDCprepare(TCGA_STAD)
+head(TCGA_STAD)
+View(TCGA_STAD)
+
+#EXPLORE METADATA
+TCGA_STAD$barcode
+table(TCGA_STAD$barcode)
+TCGA_STAD$race
+table(TCGA_STAD$race)
+TCGA_STAD$tumor_descriptor
+table(TCGA_STAD$tumor_descriptor)
+TCGA_STAD$ajcc_pathologic_stage
+table(TCGA_STAD$ajcc_pathologic_stage)
+TCGA_STAD$gender
+table(TCGA_STAD$gender)
+TCGA_STAD$primary_site
+table(TCGA_STAD$primary_site)
+TCGA_STAD$recurrence-or-progression
+table(TCGA_STAD$recurrence-or-progression)
+
+#CREATING OF SIMPLE MATADATA
+df_metadata <- data.frame("barcode" = TCGA_STAD$barcode, "race" = TCGA_STAD$race, "tumor_type" = TCGA_STAD$tumor_descriptor, "stage" = TCGA_STAD$ajcc_pathologic_stage, "metastasis_status" = TCGA_STAD$ajcc_pathologic_m, "gender" = TCGA_STAD$gender)
+
+#VIEW DF_METADATA
+View(df_metadata)
+
+#cCATEGORIZE DATA INTO MALE AND FEMALE
+STAD_rawdata <- assay(TCGA_STAD)
+male_samples <- rownames(df_metadata[df_metadata$gender == "male", ])
+> female_samples <- rownames(df_metadata[df_metadata$gender == "female", ])
+> View(male_samples)
+> View(female_samples)
+
+#REDUCING DATA INTO 20 BY 20
+STAD_sample <- c(subset(df_metadata, gender == "female")$barcode[c(1:20)], subset(df_metadata, gender == "male")$barcode[c(1:20)])
+unstranded_data <- assay(TCGA_STAD, "unstranded")
+final_df <- unstranded_data[, STAD_sample]
+dim(final_df)
+View(final_df)
+
+#CLEAN AND PREPROCESS DATA, HANDLE MISSING DATA
+table(is.na(final_df))
+
+#REMOVE MISSING DATA (NO FALSE)
+STAD_normalize <- TCGAanalyze_Normalization(tabDF = final_df, geneInfo = geneInfoHT, method = "geneLength")
+filt_STAD <- TCGAanalyze_Filtering(tabDF = STAD_normalize, method = "quantile", qnt.cut = 0.25)
+
+#DIFFERENTIAL EXPRESSION
+STAD_DEA <- TCGAanalyze_DEA(mat1 = filt_STAD[, c(STAD_sample)[1:20]], mat2 = filt_STAD[, c(STAD_sample)[21:20]], Cond1type = "female", Cond2type = "male", pipeline = "edgeR", fdr.cut = 0.05, logFC.cut = 3)
+STAD_DEA.Level <- TCGAanalyze_LevelTab(STAD_DEA, "female", "male", filt_STAD[, c(STAD_sample)[1:20]], filt_STAD[, c(STAD_sample)[21:40]])
+View(STAD_DEA.Level)
+
+#VISUALIZATION OF TOP DEG WITH A HEATMAP COLOR (FEMALE=GREEN, MALE=RED)
+STAD_heat.DEG <- filt_STAD[rownames(STAD_DEA.Level)]
+
+#COLOR CODE
+STAD_gender <- c(rep("female", 20), rep("male", 20))
+STAD_ccodes <-c()
+for (i in STAD_gender) {if (i == "female"){STAD_ccodes <- c(STAD_ccodes, "green")} else {STAD_ccodes <- c(STAD_ccodes, "red")}
++     
++ }
+
+#GENERATING HEATMAP
+heatmap.2(
+    x = as.matrix(STAD_heat.DEG),
+    col = hcl.colors(10, palette = 'Blue-Red2'),
+    Rowv = FALSE,
+    Colv = TRUE,
+    scale = "row",
+    sepcolor = "grey",
+    trace = "none",
+    key = TRUE,
+    cexRow = 0.9,
+    cexCol = 0.7,
+    main = "Heatmap (Female vs Male)",
+    na.color = "grey",
+    ColSideColors = STAD_ccodes,
+    margins = c(11, 10)
+)
+#HEATMAP WITH DANDROGRAM
+heatmap.2(
+    x = as.matrix(STAD_heat.DEG),
+    col = hcl.colors(10, palette = 'Blue-Red2'),
+    Rowv = FALSE,
+    Colv = TRUE,
+    dendrogram = "col"
+    scale = "row",
+    sepcolor = "grey",
+    trace = "none",
+    key = TRUE,
+    cexRow = 0.9,
+    cexCol = 0.7,
+    main = "Heatmap (Female vs Male)",
+    na.color = "grey",
+    ColSideColors = STAD_ccodes,
+    margins = c(11, 10)
+#VOLCANO PLOT
+ggplot(STAD_DEA.Level, aes(x = logFC, y = -log10(FDR))) +
+  geom_point(aes(color = ifelse(FDR < 0.05 & abs(logFC) > 1,
+                                ifelse(logFC > 1, "Upregulated", "Downregulated"), "Not significant")), size = 2) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black") + 
+  geom_hline(yintercept = 1.3, linetype = "dashed", color = "black") + 
+  scale_color_manual(values = c("Upregulated" = "green", "Downregulated" = "red", "Not significant" = "purple")) +
+  theme_minimal() +
+  labs(x = "Log2 Fold Change", y = "-Log10 FDR", title = "Volcano Plot (Females vs Males)", color = "Gene Regulation") +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14), 
+        plot.title = element_text(hjust = 0.5, size = 16),
+        legend.position = "top")
+)
+
+# FUNCTIONAL ENRICHMENT ANALYSIS
+
+# selecting up- and down-regulated genes from the DEA 
+STAD_upreg.genes <- rownames(subset(DEA.Level, logFC > 1 & FDR < 0.05))
+STAD_dnreg.genes <- rownames(subset(DEA.Level, logFC < -1 & FDR < 0.05))
+
+# converting ensemble IDs to gene IDs
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+upreg.genes <- getBM(attributes = c('ensembl_gene_id', 'hgnc_symbol'),
+                     filters = 'ensembl_gene_id',
+                     values = STAD_upreg.genes,
+                     mart = mart)$hgnc_symbol
+View(upreg.genes)
+
+dnreg.genes <- getBM(attributes = c('ensembl_gene_id', 'hgnc_symbol'),
+                     filters = 'ensembl_gene_id',
+                     values = STAD_dnreg.genes,
+                     mart = mart)$hgnc_symbol
+View(dnreg.genes)
+
+# ENRICHMENT ANALYSIS (EA) for up- and down-regulated genes 
+STAD_up.EA <- TCGAanalyze_EAcomplete(TFname = "Upregulated", upreg.genes) 
+STAD_dn.EA <- TCGAanalyze_EAcomplete(TFname = "Downregulated", dnreg.genes)
+
+# barplot for enriched pathways in up-regulated genes 
+TCGAvisualize_EAbarplot(tf = rownames(STAD_up.EA$ResBP), 
+                         GOBPTab = STAD_up.EA$ResBP, 
+                         GOCCTab = STAD_up.EA$ResCC,
+                         GOMFTab = STAD_up.EA$ResMF,
+                         PathTab = STAD_up.EA$ResPat, 
+                         nRGTab = upreg.genes, 
+                         nBar = 5, 
+                         text.size = 2,
+                         fig.width = 30,
+                         fig.height = 15)
+
+barplot for enriched pathways in down-regulated genes
+> TCGAvisualize_EAbarplot(tf = rownames(STAD_dn.EA$ResBP), 
+                         GOBPTab = STAD_dn.EA$ResBP, 
+                         GOCCTab = STAD_dn.EA$ResCC,
+                         GOMFTab = STAD_dn.EA$ResMF,
+                         PathTab = STAD_dn.EA$ResPat, 
+                         nRGTab = dnreg.genes, 
+                         nBar = 5, 
+                         text.size = 2, 
+                         fig.width = 30,
+                         fig.height = 15)
+
+# MACHINE LEARNING MODEL
+# load required libraries and set seed (for random number generation). This ensures that the sequence of random numbers generated will be consistent each time the code is run. It ensures reproducibility of results
+install.package("caret")
+install.package("DALEX")
+install.package("DALEXtra")
+install.package("pROC")
+install.package("tidyr")
+install.package("dplyr")
+#LOAD PACKAGES
+library(caret)
+library(DALEX)
+library(DALEXtra)
+library(pROC)
+library(tidyr)
+library(dplyr)
+
+set.seed(123)
+# Preparing the data for ML
+STAD_carcinoma_data <- final_df
+boxplot(STAD_carcinoma_data, col = "orange")
+
+# log transformation to normalize the data
+STAD_carcinoma_data <- log2(STAD_carcinoma_data + 1) 
+boxplot(STAD_carcinoma_data, col = "orange")
+
+# Editing the main data so it have rownames of the meta data
+colnames(STAD_carcinoma_data) <- gsub("\\.", "-", colnames(STAD_carcinoma_data)) 
+
+# Transpose main data
+STAD_carcinoma_data <- data.frame(t(STAD_carcinoma_data))
+
+# Calculates the standard deviation (SD) for each column (each gene) in STAD_carcinoma_data and the results are saved in the vector SDs. Higher SD shows great variability in the gene expression levels.
+SDs = apply(STAD_carcinoma_data, 2, sd) Higher SD shows great variability in the gene expression levels.
+
+# Selecting the top 3000 genes with the highest SD in descending order, to give more information for further analyses.
+topPredicts = order(SDs, decreasing = T)[1:3000]
+STAD_carcinoma_data = STAD_carcinoma_data[, topPredicts]
+STAD_SDs = apply(STAD_carcinoma_data, 2, sd)
+
+# Preparing the meta data
+STAD_carcinoma_meta <-  df_metadata
+anyNA(STAD_carcinoma_meta)
+sum(is.na(STAD_carcinoma_meta))
+STAD_carcinoma_meta <- STAD_carcinoma_meta %>% drop_na()
+anyNA(STAD_carcinoma_meta)
+
+#changed the rownames from numerical "1, 2, 3, 4, 5...." to the Barcode
+rownames(STAD_carcinoma_meta) <- STAD_carcinoma_meta$barcode 
+#to remove the row name duplicate
+STAD_carcinoma_meta$barcode <- NULL 
+
+# Merging both main and meta data
+STAD_carcinoma_merged_data <- merge(STAD_carcinoma_data, STAD_carcinoma_meta, by = "row.names")
+dim(STAD_carcinoma_merged_data)
+
+View(stcarcinoma_merged_data)
+
+# make row names the samples
+rownames(STAD_carcinoma_merged_data) <- STAD_carcinoma_merged_data$Row.names 
+
+# remove duplicate columns of row names
+STAD_carcinoma_merged_data$Row.names <- NULL 
+
+# remove near zero variation
+all_zero <- preProcess(STAD_carcinoma_merged_data, method = "nzv", uniqueCut = 15)
+STAD_carcinoma_merged_data <- predict(all_zero, STAD_carcinoma_merged_data)
+dim(STAD_carcinoma_merged_data)
+
+# Preparing the data for the ML model
+
+# Assuming data is loaded in the variable STAD_carcinoma_merged_data
+STAD_data <- STAD_carcinoma_merged_data
+
+# One-hot encoding the gender (convert gender into 0 and 1)
+STAD_data$gender <- ifelse(STAD_data$gender == "female", 0, 1)
+
+# Select only the gene expression columns (assuming columns starting with 'ENSG' are gene expression data)
+gene_expression_columns <- grep("^ENSG", colnames(STAD_data), value = TRUE)
+
+X <- STAD_data[, gene_expression_columns]
+y <- STAD_data$gender
+# Split the data into training and testing sets
+set.seed(123)  
+trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
+X_train <- X[trainIndex, ]
+X_test <- X[-trainIndex, ]
+y_train <- y[trainIndex]
+y_test <- y[-trainIndex]
+
+# Conducting KNN model
+knn_model <- train(X_train, as.factor(y_train), method = "knn", tuneLength = 5)
+
+# Predict on the test set
+y_pred <- predict(knn_model, X_test)
+x_pred <- predict(knn_model, X_train)
+
+# Evaluating model using confusion matrix
+conf_matrix <- confusionMatrix(y_pred, as.factor(y_test))
+conf_matrix1 <- confusionMatrix(x_pred, as.factor(y_train))
+print(conf_matrix)
+print(conf_matrix1)
+
+# Perform permutation importance
+set.seed(123) 
+importance <- varImp(knn_model, scale = FALSE)
+print(importance)
